@@ -1,0 +1,853 @@
+---
+title: "Campaign Contributions: Presidential Race in Pennsylvania, 2016"
+author: "Tom Nececkas"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    code_folding: show
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 2
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+# Can campaign contributions predict an election's winner?
+
+In 2016, campaign contributions seemed like a lousy predictor of success.
+
+For example, in a March [press statement](https://berniesanders.com/press-release/bernie-beats-the-clinton-money-machine-again/), Bernie Sanders' campaign bragged about having 2.2 million more contributions than Hillary Clinton's campaign. Come July, Clinton was the Democratic Party's nominee.
+
+Discussing the Clinton campaign's staggering \$400 million in contributions as of September, the [Atlantic](https://www.theatlantic.com/politics/archive/2016/09/hillary-clinton-has-a-lot-of-money/498467/) wryly observed: "If Hillary Clinton loses in November, it won't be for lack of money." Come November, Donald Trump was the president-elect.
+
+*So what, if anything, do campaign contributions say about who's likely to win an election?*
+
+Pennsylvania seemed like a good place to start answering that question. It's the [5th most populous state](https://en.wikipedia.org/wiki/List_of_U.S._states_and_territories_by_population) and, more importantly, it's widely seen as a [battle ground state](https://en.wikipedia.org/wiki/Swing_state#Competitive_states), and some had predicted it could be the [deciding factor](https://fivethirtyeight.com/features/pennsylvania-could-be-an-electoral-tipping-point/) in the 2016 election. Plus, Pennsylvania voters chose the same winners as the country.
+
+# The Dataset & Summary Statistics
+
+The dataset of campaign contributions was made available by the [Federal Election Commission](http://classic.fec.gov/disclosurep/pnational.do). When I downloaded the dataset, an extra comma in the header row prevented it from loading.  If you run into the same problem, you can simply open the .csv file and remove the comma.
+
+I've included a basic summary of the dataset. Although the summary doesn't help answer our question, it's still useful to see what types of information are available to explore.
+
+*One important thing to note:* Each of the dataset's roughly 244,000 observations represents one financial contribution. Each observation *does not* represent one individual, since an individual could give more than once.
+
+```{r message = FALSE, warning=FALSE}
+# Preparations
+
+# Loads dataset
+fc <- read.csv('P00000001-PA.csv', header = TRUE)
+
+# Loads applications
+library(ggplot2)
+library(knitr)
+library(plyr)
+library(dplyr)
+library(forcats)
+library(ggmap)
+library(zipcode)
+library(RColorBrewer)
+library(stringr)
+library(scales)
+library(grid)
+library(gridExtra)
+
+# Uncomment below 2 lines if you need to install the chroplethrZip package
+# library(devtools)
+# install_github('arilamstein/choroplethrZip@v1.4.0')
+library(choroplethr)
+library(choroplethrMaps)
+library(choroplethrZip) # version 1.4.0 needed to plot reference map
+data(zipcode)
+
+# Converts contb_receipt_dt to Date data type
+fc$contb_receipt_dt <- as.Date(strptime(fc$contb_receipt_dt, "%d-%b-%y"))
+
+summary(fc)
+```
+
+
+# Exploration
+
+## Does the average size of a contribution matter?
+
+Some campaigns rely on lots of donors who give small amounts, while other campaigns rely on fewer donors who give large amounts. Therefore, the average size of a contribution might say something about the types of people supporting a campaign, which might indicate a campaign is more or less likely to succeed.
+
+I began by making a boxplot to look at the average contribution size for each campaign. I excluded negative values, which represent a campaign returning money (e.g. because the campaign ended, or because a contributor more than is allowed.)
+
+```{r}
+# creates variable base_contbr_boxplot
+# base01 contains boxplot of contb_receipt_amt broken down by candidate name
+boxplot_amt <- ggplot(fc, aes(x = cand_nm, y = contb_receipt_amt)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = -30, vjust = 1, hjust = 0)) +
+  xlab(NULL)
+
+boxplot_amt + ylim(0,12500)
+```
+
+
+It was hard to tell much from the boxplot. The median contribution for the most successful candidates -- Trump, Clinton, Sanders, and Cruz -- was indeed lower than most other candidates. But that didn't help distinguish *between* Trump, Clinton, Sanders, and Kruz.
+
+If we zoomed in on the most successful candidates, would we start to see that campaign contributions did predict success?
+
+## Does the number of contributions or total amount of contributions matter?
+
+When we started, I noted that news coverage about *national trends* in campaign contributions made them seem like a lousy predictor of a candidate's success in 2016. If we focus on only Pennsylvania, will we find that campaign contributions are a better predictor at the *state level*?
+
+```{r}
+# Limits df to positive contributions
+# Unlike neg. contributions, positive contributions indicate support
+fc_positive <- subset(fc, fc$contb_receipt_amt > 0)
+
+# Creates filters for looking at different sets of candidates
+# Plotting all the candidates makes the plots too cluttered to understand
+# primary_candidates received more than 1% of the vote in their primaries
+# extended_primary includes candidates who received significant contributions
+primary_candidates <- c("Trump, Donald J.", "Clinton, Hillary Rodham", 
+  "Sanders, Bernard", "Cruz, Rafael Edward 'Ted'", "Kasich, John R.")
+extended_primary <- c(primary_candidates, "Rubio, Marco",
+  "Carson, Benjamin S.", "Bush, Jeb")
+trump_clinton <- c("Trump, Donald J.", "Clinton, Hillary Rodham")
+extended_general <- c(trump_clinton, "Third Party")
+
+# Sets colors for main candidates
+# This makes it easier to compare plots through the exploration
+group_colors <- c("Clinton, Hillary Rodham"   = "blue1", 
+                  "Cruz, Rafael Edward 'Ted'" = "darkorange", 
+                  "Sanders, Bernard"          = "purple", 
+                  "Trump, Donald J."          = "red1", 
+                  "Kasich, John R."           = "green3",
+                  "Third Party"               = "green1",
+                  "Rubio, Marco"              = "cyan1",
+                  "Carson, Benjamin S."       = "gold1",
+                  "Bush, Jeb"                 = "maroon1")
+
+# function that creates bargraphs
+# inputs: operation can be either "count" or "sum"
+# limitation: remove group_colors is you want to plot all candidates
+make_bargraph <- function(df, operation, title) {
+  # different aesthetics are needed to plot a count or sum
+  # the geom_bar stat is different based on whether plotting count or sum
+  if (operation == "sum") {
+    plot <- ggplot(data = df, aes(x = cand_nm, y = contb_receipt_amt)) +
+      geom_bar(stat = "summary", fun.y = "sum", aes(fill = cand_nm))
+  }  else if (operation == "count") {
+    plot <- ggplot(data = df, aes(x = cand_nm)) +
+      geom_bar(stat = "count", aes(fill = cand_nm))
+  }
+  # adds layers that deal with presentation (labels, guides, etc.)
+  plot <- plot + xlab(NULL) + ylab(NULL) + guides(fill = FALSE) +
+    ggtitle(title) +
+    scale_fill_manual(values = group_colors) +
+    theme(axis.text.x = element_text(angle = -30, vjust = 1,
+      hjust = 0, size = 6), plot.title = element_text(hjust=.5))
+  plot  # returns plot
+}
+
+# Creates df of main primary candidates & contributions during the primary
+# Runs make_bargraph function to create plots sums/counts
+df_primary <- subset(fc_positive, fc_positive$election_tp == "P2016" &
+  fc_positive$cand_nm %in% primary_candidates)
+p1 <- make_bargraph(df_primary, "count", "Primary Election - Count")
+p2 <- make_bargraph(df_primary, "sum", "Primary Election - Total $")
+
+# Creates df of main general election candidates & contributions during general
+# Runs make_bargraph function to create plots sums/counts
+df_general <- subset(fc_positive, fc_positive$election_tp == "G2016" &
+  fc_positive$cand_nm %in% trump_clinton)
+p3 <- make_bargraph(df_general, "count", "General Election - Count")
+p4 <- make_bargraph(df_general, "sum", "General Election - Total $")
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+
+So, when we look at Pennsylvania *state trends* in campaign contributions, do campaign contributions seem like a better predictor? Not really. 
+
+In Pennsylvania, Sanders received about 50% more contributions than Clinton, and he still lost the primary.
+
+Clinton received several times the number and sum of contributions as Trump, and she still lost the general election.
+
+If the counts and sums of contributions don't tell us much, can we learn anything from the timing of those contributions?
+
+## Does the timing of contributions matter?
+
+Before delving into the data, I wanted to refresh myself on the relevant dates and get a baseline for *all* contributions.
+
+Event | Date
+:-----|-------:
+First Caucus (Iowa) | February 1, 2016
+Pennsylvania Primary | April 26, 2016
+Last Primary for Republicans (South Dakota) | June 7, 2016
+Last Primary for Democrats (D.C.) | June 14, 2016
+Republican National Convention | July 18, 2016
+Democratic National Convention | July 28, 2016
+Election | November 8, 2016
+Source: [website of primary dates](http://www.uspresidentialelectionnews.com/2016-presidential-primary-schedule-calendar/) and just google results pages for other dates
+
+```{r}
+# Creates df named fc_weeks
+# Groups contributions by week and election_tp
+# df used to plot changes in contributions over time, based on election type
+fc_weeks <- fc_positive %>%
+  group_by(week = cut(contb_receipt_dt, "week"), election_tp) %>%
+  summarise(contb_amt = sum(contb_receipt_amt),
+            n = n())
+
+fc_weeks$week <- as.Date(fc_weeks$week) # corrects "week" data type
+
+# Creates plot by week
+# Doesn't add a geom_line, so that can be added later
+week_plot <- ggplot(data = fc_weeks,
+  aes(x = week, group = election_tp)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %g") +
+  theme(axis.text.x = element_text(angle = -30, vjust = 1, hjust = 0),
+    legend.position = "bottom") +
+  xlab(NULL)
+
+# Plots by week, with count of contributions on y axis
+week_plot + geom_line(aes(y = n, color = election_tp))
+```
+
+
+Contributions to the primary didn't pick up until early 2016, then dipped around May and June, 2016 -- immediately following the Pennsylvania primary. Then they jupmed again in July, when both major parties held their conventions.
+
+After the conventions, contributions switched to the general election. These peaked in early November, near election day.
+
+There's nothing too surpring here. However, it's important to note that several "primary" contributions actually occured after the primary elections, meaning they couldn't have been useful in predicting the primary results.
+
+So now we've got a baseline. But what does looking at contributions to *individual* candidates tell us about their odds of success?
+ 
+```{r}
+# Creates df for looking at only primary contributions
+fc_primary <- subset(fc_positive, election_tp == "P2016")
+
+# Creates df for looking at only general election contributions
+fc_general <- subset(fc_positive, election_tp == "G2016")
+
+# For general election df, combines third party candidates
+fc_general$cand_nm <- fc_general$cand_nm %>%
+  fct_collapse("Third Party" = c("Johnson, Gary", "Stein, Jill", 
+    "McMullin, Evan"))
+
+# Creates function that splits candidates by week and candidate
+# Calculates what count and sum are relative to other candidates
+split_weeks_candidates <- function(df) {
+  df %>% group_by(week = cut(contb_receipt_dt, "week"), cand_nm) %>%
+  summarise(contb_amt = sum(contb_receipt_amt),
+    n = n()) %>%
+  mutate(rel_count = n / sum(n),
+    rel_amt = contb_amt / sum(contb_amt)) %>%
+  arrange(week)
+}
+
+# Creates dataframe fc_by_week.primaries for primary contributions
+# Relative number/amount of contributions grouped by candidate and week
+fc_weeks_primary <- split_weeks_candidates(fc_primary)
+fc_weeks_primary$week <- as.Date(fc_weeks_primary$week) # corrects date
+
+# Creates dataframe fc_by_week.general for general election contributions
+# Relative frequency/proportion of contributions grouped by candidate and week
+fc_weeks_general <- split_weeks_candidates(fc_general)
+fc_weeks_general$week <- as.Date(fc_weeks_general$week) # corrects date
+
+# Creates dataframe fc_by_week.overall for entire election season
+# Relative frequency/proportion of contributions grouped by candidate and week
+fc_weeks_overall <- split_weeks_candidates(fc_positive)
+fc_weeks_overall$week <- as.Date(fc_weeks_overall$week) # corrects date
+
+# function creates week-by-week plot for given candidates
+# "value" input can be "count", "relative number", or "relative amount"
+plot_weeks <- function(df, value, title) {
+  plot1 <- ggplot(df, aes(x = week, group = cand_nm, color = cand_nm))
+  # geom_line changes based on what value is of interest
+  if (value == "count") {
+    plot2 <- plot1 + geom_line(aes(y = n))
+  } else if (value == "relative number") {
+    plot2 <- plot1 + geom_line(aes(y = rel_count))
+  } else if (value == "relative amount") {
+    plot2 <- plot1 + geom_line(aes(y = rel_amt))
+  }
+  # adds layers that deal with presentation (labels, guides, etc.)
+  plot3 <- plot2 +
+    scale_x_date(date_breaks = "1 month", date_labels = "%b %g") +
+    ggtitle(title) +
+    scale_color_manual(values = group_colors) +
+    xlab(NULL) + ylab(NULL) +
+    theme(axis.text.x = element_text(angle = -30, vjust = 1, hjust = 0),
+      plot.title = element_text(hjust=.5), legend.position = "bottom",
+      legend.title = element_blank())
+  plot3
+}
+
+# creates df for plotting timeline of contributions during entire 
+# limits time frame to focus on when most primary contributions were received
+timeline_overall <- subset(fc_weeks_overall, 
+  fc_weeks_overall$cand_nm %in% primary_candidates &
+  fc_weeks_overall$week >= "2016-02-01" & fc_weeks_overall$week <= "2016-11-15")
+# plots number of contributions during the primary
+plot_weeks(timeline_overall, "count", "Number of Contributions per Week")
+```
+
+
+This graph already says a lot, but I want to hone in on the primary and general election, so I'm going to limit the time frame.
+
+```{r}
+# creates df for plotting timeline of general election
+# limits time frame to focus on when most primary contributions were received
+timeline_primary <- subset(fc_weeks_primary, 
+  fc_weeks_primary$cand_nm %in% extended_primary &
+  fc_weeks_primary$week >= "2015-11-01" & fc_weeks_primary$week <= "2016-07-28")
+# plots number of contributions during the primary
+plot_weeks(timeline_primary, "count", "Number of Contributions per Week for the Primary")
+```
+
+
+So does the timing of contributions seem like it could be a predictor of success for the primaries? No.
+
+If anything, the timing makes the number of contributions look like an even worse predictor of success, since Clinton and Trump received many "primary" contributions in the lead-up to their party conventions, after they were already the clear winners. If we ignored those late-stage contributions, Sanders' lead over Clinton and Cruz's lead over Trump would be even more pronounced.
+
+*Trump's contributions didn't even climb noticeably above zero per week until **after** the Pennsylvania primary.*
+
+I thought that plotting the *relative* number of contributions would make these trends even more noticeable, by eliminating overall trends in contributions.
+
+```{r}
+# plots relative number of contributions during the primary
+# limits time frame to focus on when most primary contributions were received
+plot_weeks(timeline_primary, "relative number", 
+  "Relative Number of Contributions --- Primary")
+```
+
+
+Looking at the relative numbers, it's clear that Sanders received about **twice** as many contributions per week as Clinton from late 2015 to May 2016. But, again, those contributions didn't mean he would win.
+
+It's possible that the timing of contributions might still be important, but that we should be looking at contribution amounts. For example, if a candidate received a greater amount of contributions closer to the election, maybe that indicated support for their campaign was growing. What do the relative amounts of contributions tell us about the growing or waning support for a campaign?
+
+```{r}
+# plots relative amount of contributions during the primary
+# limits time frame to focus on when most primary contributions were received
+plot_weeks(timeline_primary, "relative amount", 
+  "Relative Amount of Contributions --- Primary")
+```
+
+
+When we look at the timing of when contribution amounts were received, do we see a different story? No -- Sanders received a greater amount of contributions than Clinton in the months immediately before the primary. The same is true for Cruz versus Trump.
+
+There's another possible interpretation of timing. Clinton received a higher amount of contributions for most of November 2015 through February 2016. We might tentatively posit that receiving greater amounts when Clinton did -- *before* primaries began -- was a predictor of later success. 
+
+But that doesn't hold true on the Republican side, where Cruz, Carson, and Rubio all led Trump for late 2015 and early 2016. 
+
+Is it possible that the timing of contributions isn't a good predictor during the primaries, but that it's a better predictor of the general election?
+
+```{r}
+# creates df for plotting timeline of general election
+timeline_general <- subset(fc_weeks_general, 
+  fc_weeks_general$cand_nm %in% extended_general &
+  fc_weeks_general$week >= "2016-07-28" & fc_weeks_general$week <= "2016-11-15")
+
+# plots number of contributions during the general election
+plot_weeks(timeline_general, "relative number", 
+  "Relative Number of Contributions --- General Election")
+```
+
+
+*Clinton absolutely dominated Trump in the number of contributions received per week from mid-August to the election day.* It'd be difficult for there to be a clearer indication that the number of contributions did not predict the winner.
+
+As for the amount of contributions?
+
+```{r}
+# plots number of contributions during the general election
+plot_weeks(timeline_general, "relative amount", 
+  "Relative Amount of Contributions --- General Election")
+```
+
+
+The gap in contribution amounts was consistently closer, but Clinton still received more than twice -- and sometimes three times -- the amount of contributions as Trump.
+
+So it didn't matter *when* a candidate received their contributions. Did it matter *who* was giving the contributions?
+
+## Do the occupations of contributors matter?
+
+Perhaps some contributors more reliably indicate the eventual winner. Some people might be more influential in an election's outcome, or a certain group of people might be a good bellweather for how their neighbors will vote.
+
+I didn't have a detailed profile on each contributor, but I did have information about their occupation and their geographic location. I decided to first look at contributors' occupations.
+
+Which candidate did better with nurses? With CEO's? And were contributions from one group possibly more predictive than support from another group?
+
+To answer these questions, I wanted to look at the number of unique contributors with each occupation. If John, a truck driver, contributed four times, I still only wanted to count him as one truck driver.
+
+To identify unique contributors, I decided that two contributions that shared the same contributor name, zip code, and occupation were probably from the same person.
+
+```{r}
+# function returns df with only unique contributors
+# persons with same name, occupation, and zip are considred to be one person
+# later contributions from same person are removed as duplicates
+find_uniques <- function(df) {
+  index <- unique(df[ , c("contbr_nm", "contbr_zip", "contbr_occupation")])
+  df[rownames(index), ]
+}
+
+# finds unique contributors for the primaries
+fc_unique_primary <- find_uniques(fc_primary)
+# finds unique contributors for the general election
+fc_unique_general <- find_uniques(fc_general)
+# finds unique contributors for the general election
+fc_unique_all <- find_uniques(fc_positive)
+
+nrow(fc_unique_all)
+```
+
+Woah! There are only 61,381 unique contributors. That's far less than I expected, given that there were more than 241,000 positive-value contributions. This is worth investigating more!
+
+But first, I still wanted to look at occupations.
+
+```{r}
+# combines occupations which are different names for the same thing
+# there were too many occupations to review them all
+# I chose which to combine after looking at those with > 100 contributors
+combine_occupations <- function(data) {
+  data %>% fct_collapse(
+    "NURSE"                 = c("NURSE", "RN", "REGISTERED NURSE"),
+    "ATTORNEY"              = c("ATTORNEY", "LAWYER"),
+    "SELF-EMPLOYED"         = c("SELF-EMPLOYED", "SELF EMPLOYED"),
+    "BUSINESS OWNER"        = c("BUSINESS OWNER", "OWNER"),
+    "INFORMATION REQUESTED" = c("INFORMATION REQUESTED",
+                                "INFORMATION REQUESTED PER BEST EFFORTS"))
+}
+
+# clean up common job names for contributors during the primary
+fc_unique_primary$contbr_occupation <-
+  combine_occupations(fc_unique_primary$contbr_occupation)
+# clean up common job names for contributors during the general election
+fc_unique_general$contbr_occupation <-
+  combine_occupations(fc_unique_general$contbr_occupation)
+
+# create vector of common occupations of contributors overall
+# "common" is 100 or more (likely unique) individuals
+# without limiting our focus, there would be an unmanagable # of graphs
+common_occupations <- fc_unique_all %>%
+  group_by(contbr_occupation) %>%
+  summarise(n = n()) %>%
+  filter(n >= 100)
+common_occupations_vector <- as.vector(common_occupations$contbr_occupation)
+
+# function that prepares df's for plotting occupations
+# 1. filters to remove common occupations held by >= 100 contributors
+# 2. finds how many people with a common occupation gave to each candidate
+group_jobs <- function(df) {
+  df_sub <- subset(df, df$contbr_occupation %in% common_occupations_vector)
+  df_sub %>%
+    group_by(contbr_occupation, cand_nm) %>%
+    summarise(total_n = n())
+}
+
+# prepares primary and general election data for plotting occupations
+fc_jobs_primary <- group_jobs(fc_unique_primary)
+fc_jobs_general <- group_jobs(fc_unique_general)
+
+```
+
+```{r fig.height = 30, out.height = 30}
+# {r fig.height = 29, fig.width=20, out.height= "9 in", out.width= "10 in"}
+# plots number of contributors of each occupation for a given dataframe
+plot_occupations <- function (df) {
+  ggplot(data = df, aes(x = cand_nm)) +
+  geom_bar(aes(y = total_n, fill = cand_nm), stat = "identity") +
+  scale_fill_manual(values = group_colors) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  xlab(NULL) +
+  facet_wrap(~contbr_occupation, scales = "free_y", ncol = 4) +
+  theme(strip.text.x = element_text(size = 5, color = "red"),
+    panel.spacing = unit(1, "lines"), 
+    axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+    legend.position = "bottom")
+}
+# substitute the below code for the theme above for more readable text
+# however, the below code will make the html output less readable
+# 
+#  theme(strip.text.x = element_text(size = 30, color = "red"),
+#    panel.spacing = unit(2, "lines"), legend.position = "bottom",
+#    legend.text = element_text(size = 50))
+
+
+
+# plots number of contributors of each occupation for the primaries
+df_jobs_01 <- subset(fc_jobs_primary, fc_jobs_primary$cand_nm %in%
+  primary_candidates)
+plot_occupations(df_jobs_01)
+
+```
+
+
+There's a lot to unpack here.
+
+For one, Kasich's main supporters were executives, presidents, and CEOs -- though since he didn't lead among these occupations, Kasich's loss doesn't say anything about the influence of these wealthy contributors.
+
+There were two occupations that are difficult to interpret -- why did some people list their occupation as "None," and why were these mostly Cruz contributors? And why did Trump receive the most contributors for whom their occupation was "Information Requested"? It's possible these people were unemployed, but it's also possible these people chose not to disclose their occupation, which begs the question *Why?* The dataset doesn't have enough information to answer this question.
+
+As for Sanders, he fared well among contributors of several occupations, many of which also favored Clinton. There were a few exceptions: Sanders and Trump split the support of engineers, and Sanders led all the candidates among software engineers and the not employed.
+
+Compared to Sanders, Clinton had an uncontested lead among several more common occupations. This is really the first time that Pennsylvania's campaign contributions begin to display some predictive power. But is that because we're looking at occupations, or because we're looking at **unique** contributors?
+
+The same question arises when we look at Trump --- who either led or held even with the other Republicans in almost every category.
+
+But before looking at unique contributors more generally, let's look at unique contributors to the general election.
+
+```{r fig.height = 30, out.height = 30}
+# {r fig.height = 30, fig.width=20, out.height = "9 in", out.width="10 in"}
+# plots number of contributors of each occupation for the primaries
+df_jobs_02 <- subset(fc_jobs_general, fc_jobs_general$cand_nm %in%
+  extended_general)
+plot_occupations(df_jobs_02)
+```
+
+
+When shifting focus from the primaries to the general election, we can ask an interesting question: *Did Sanders' supporters switch to Clinton or Trump?* Among occupations where Sanders clearly led in the primary --- software engineers and the not employed --- Clinton now leads Trump. These results are suggestive, but certainly not definitive, since we're not necessarily tracking the same individuals.
+
+Then there's the larger question: *Could focusing on contributors' occupations have helped us predict the general election outcome?* It's hard to say, but we can rule out some things about occupations being predictive:
+
+Clinton led among several occupations that might be called intellectuals or well-educated -- such as attorneys, scientists, students, professors, nurses, physicians, teachers, educators, software engineers, and writers -- and the support of the well-educated did not translate into a win.
+
+The not employed and difficult-to-understand "None" category also overwhelmingly supported Clinton --- and these groups' support did not translate into electoral success.
+
+It becomes harder to make even tentative conclusions when looking at the occupations of Trump's supporters. Trump led among some blue collar workers --- like truck drivers and contractors --- but we can't say these supporters predicted his success, only that we can't rule it out.
+
+But let's now turn to a more promising question. Since about...
+
+```{r}
+# these are the numbers of positive contributrions and unique contributors
+# see beginning of the occupations section for how these #s were arrived at
+(241028 - 61381)/241028
+```
+
+75% of contributions were made by repeat contributors, what happens when we begin looking at the number of *unique contributors*, not the number of contributions?
+
+## Does the number of unique contributors matter?
+
+```{r}
+# orders df first by date, then by contributor name
+# this will make it easier to replot timelines looking at unique contributors
+fc_ordered <- fc_positive[with(fc_positive, order(contb_receipt_dt,
+  contbr_nm)),] 
+
+# now, running find_uniques finds the 1st time a unique contributor gave
+# every later contribution from that contributor is removed
+fc_unique_ordered <- find_uniques(fc_ordered)
+
+```
+
+```{r}
+# Creates df of main primary candidates & unique contributors during the primary
+# Runs make_bargraph function to create plot of counts
+df_primary_unique <- subset(fc_unique_ordered, 
+  fc_unique_ordered$election_tp == "P2016" &
+  fc_unique_ordered$cand_nm %in% primary_candidates)
+p1u <- make_bargraph(df_primary_unique, "count",
+  "Primary - Unique Contributors")
+
+# Creates df of general election candidates & unique contributors in the general
+# Runs make_bargraph function to create plot of counts
+df_general_unique <- subset(fc_unique_ordered, 
+  fc_unique_ordered$election_tp == "G2016" &
+  fc_unique_ordered$cand_nm %in% trump_clinton)
+p2u <- make_bargraph(df_general_unique, "count",
+  "General - Unique Contributors")
+
+grid.arrange(p1u, p2u, ncol = 2)
+```
+
+
+Looking at unique contributors, we begin to see the possibility that campaign contributions might be predictive of a candidate's success!
+
+Clinton had more unique contributors than Sanders in the primary, and she won PA's democratic primary. Trump had more unique contributors than Kasich or Cruz in the primary, and he won PA's Republican primary. Unique contributors looks like it might be predictive of who's going to win a party's primary.
+
+But the predictive power falls away when we look at the general election. Although Clinton's lead has narrowed --- as compared to contribution numbers or total dollar amounts --- she still had more unique contributors in the general election and lost to Trump.
+
+But what if we look at the timeline of when unique contributors first gave to a campaign? Will we find a way to fine tune our analysis?
+
+```{r}
+# breaks dataframe down by weeks and candidate receiving contribution
+# creates df that only includes 1st time a unique contributor gave
+fc_weeks_unique <- split_weeks_candidates(fc_unique_ordered)
+fc_weeks_unique$week <- as.Date(fc_weeks_unique$week) # corrects date
+
+
+# creates df for plotting timeline of most contributions
+# limits time frame to focus on when main primary season and general election
+timeline_unique <- subset(fc_weeks_unique, 
+  fc_weeks_unique$cand_nm %in% primary_candidates &
+  fc_weeks_unique$week >= "2016-02-01" & fc_weeks_unique$week <= "2016-11-14")
+# plots number of unique contributors throughout main election season
+plot_weeks(timeline_unique, "count", 
+  "Unique Contributors:\nBy Date of 1st Contribution")
+```
+
+
+Now that we're looking at unique contributors, we get a **VERY** different perspective on campaign contributions during the presidential campaign.
+
+Trump had two huge spikes in the number of first-time contributors in July, before the Republican National Convention, and in August, *after* the convention. Maybe when considering whether first-time contributors might predict the *general election* winner, we should look at unique contributors during both the primary and general election.
+
+Also of note, Cruz was beating Trump in first-time contributors until the beginning of May, right after the Pennsylvania primary. If first-time contributors were as predictive of a *primary's* winner, shouldn't we focus on contributions before the primary took place? Otherwise, we're just seeing contributors **react** to the winner.
+
+What happens when we incorporate these lessons into the bar graphs above?
+
+```{r}
+# Creates df of main primary candidates & contributions during the primary
+# Limits df to on or before April 26, when PA primary occurred
+# Runs make_bargraph function to create plot of counts
+df_b4primary_unique <- subset(fc_unique_ordered, 
+  fc_unique_ordered$election_tp == "P2016" &
+  fc_unique_ordered$cand_nm %in% primary_candidates &
+  fc_unique_ordered$contb_receipt_dt <= "2016-04-26")
+p3u <- make_bargraph(df_b4primary_unique, "count",
+  "Unique Contributors Before Primary")
+
+# Creates df of main general election candidates & all unique contributors
+# Does NOT split contributors based on if they gave to the primary or general
+# Runs make_bargraph function to create plot of counts
+df_overall_unique <- subset(fc_unique_ordered, 
+  fc_unique_ordered$cand_nm %in% trump_clinton)
+p4u <- make_bargraph(df_overall_unique, "count",
+  "All Unique Contributors")
+
+grid.arrange(p3u, p4u, ncol = 2)
+```
+
+
+Now, it seems like our most recent --- and tentative --- hypotheses have been turned upside down.
+
+The number of unique contributors was NOT predictive of a campaign's success in the primary. Before the PA primary, Sanders had more unique contributors than Clinton, and he still lost the primary. Before the PA primary, Cruz had many times more unique contributors than Trump --- and even Kasich had about twice as many contributors as Trump --- and both Cruz and Kasich lost.
+
+On the other hand, the number of unique contribtors may *possibly* have been predictive of the general election results. Trump had more unique contributors than Clinton throughout the *entire* election season.
+
+This is the first time that some portion of campaign contribution data might be useful in predicting general election results! Certainly, this is tentative, but it's still a potentially useful result that's worth exploring more.
+
+Now let's look at one more variable: location. Much has been made of the divide between rural and city voters. What happens when we look at these voters using our newfound awareness of the potential predictive power of unique contributors?
+
+## Do the locations of contributors matter?
+
+Before answering this question, I needed to do a little data cleaning. When I used zip codes from the campaign contributions to look up latitude, longitude, city, and state; I was surprised to find that some zip codes were not in Pennsylvania.
+
+```{r}
+# cleans zip codes & removes nonsensical zip codes (e.g. 1-digit zip codes)
+# takes df as input, and merges with zipcode df to add latitude/longitude
+merge_zip <- function(df) {
+  df$contbr_zip <- substr(df$contbr_zip, 1, 5) # takes 1st 5-digits of zip code
+  df$contbr_zip <- clean.zipcodes(df$contbr_zip) # further cleans zip codes
+  merge(df, zipcode, by.x='contbr_zip', by.y='zip')
+}
+
+# merges df with unique contributors & df with zip code info
+fc_unique_zip <- merge_zip(fc_unique_ordered)
+# merges df with all positive-value contributions & df with zip code info
+fc_positive_zip <- merge_zip(fc_positive)
+
+nrow(fc_unique_zip[fc_unique_zip$state != 'PA', ])
+```
+
+Since there were only 27 unique contributors outside Pennsylvania, out of about 61,000 contributors, I decided to simply exclude these contributors and continue with the analysis.
+
+```{r}
+# excludes records where state is outside PA
+fc_unique_zip <- fc_unique_zip[fc_unique_zip$state == 'PA', ]
+fc_positive_zip <- fc_positive_zip[fc_positive_zip$state == 'PA', ]
+
+
+# for each zip, counts number of records associated with each candidate
+get_zip_totals <- function(df) {
+  df %>%
+  group_by(contbr_zip, city, latitude, longitude, cand_nm) %>%
+  summarise(total_n = n()) %>%
+  arrange(contbr_zip)
+}
+
+# for each zip code, counts unique contributors for each candidate
+fc_unique_zipsum <- get_zip_totals(fc_unique_zip)
+# for each zip code, counts number of contributions for each candidate
+fc_positive_zipsum <- get_zip_totals(fc_positive_zip)
+```
+
+To map contributions, I used the choroplethr package. It was mostly straight-forward, but this [stack exchange](https://stackoverflow.com/questions/30787877/making-a-zip-code-choropleth-in-r-using-ggplot2-and-ggmap) post was particularly useful in helping understand choroplethr's zipcode functionality.
+
+```{r}
+# prepares df that can be mapped by choroplethr
+# mapping with choroplethr requires specific column names
+# this function adds those column names
+# this function also pulls out the values associated with a candidate
+prepare_for_choropleth <- function(df, candidate) {
+  df <- df[df$cand_nm == candidate, ]
+  df <- df[, c("contbr_zip", "total_n")]
+  colnames(df) <- c("region", "value")
+  df
+}
+
+# prepares df's to map choropleths for various candidates
+choro_unique_trump <- prepare_for_choropleth(fc_unique_zipsum,
+  "Trump, Donald J.")
+choro_unique_clinton <- prepare_for_choropleth(fc_unique_zipsum,
+  "Clinton, Hillary Rodham")
+
+# the below df's are not used in the plots below
+# they were interesting to look at, but too many maps became overwhelming...
+# and not particularly helpful in understanding trends.
+# Feel free to uncomment and look around!
+# some interesting take-aways:
+# (1) looking at contributions is also misleading in rural areas
+# (2) Sanders mostly had zero contributors in the same zip codes as Clinton
+#
+# choro_positive_trump <- prepare_for_choropleth(fc_positive_zipsum,
+#  "Trump, Donald J.")
+# choro_positive_clinton <- prepare_for_choropleth(fc_positive_zipsum, 
+#  "Clinton, Hillary Rodham")
+# choro_unique_sanders <- prepare_for_choropleth(fc_unique_zipsum,
+#  "Sanders, Bernard")
+# choro_positive_sanders <- prepare_for_choropleth(fc_positive_zipsum, 
+#  "Sanders, Bernard")
+```
+
+
+```{r warning=FALSE, message=FALSE}
+# function accepts df and title as variables
+# zip_choropleth function returns a ggplot
+# the ggplot is modified to focus on values that highlight rural areas
+map_state <- function(df, title) {
+  zip_choropleth(df, state_zoom = 'pennsylvania', reference_map = TRUE, 
+    title = title, num_colors = 1) +
+  coord_map() +
+  scale_fill_gradient(low = "yellow", high = "blue", na.value = "black",
+    limits = c(0,45), oob = squish)
+}
+
+map_state(choro_unique_trump, "Trump: Unique Contributors")
+```
+
+```{r warning=FALSE, message=FALSE}
+map_state(choro_unique_clinton, "Clinton: Unique Contributors")
+```
+
+
+A couple things to note about the above choropleths: (1) zip codes with no contributors are black and (2) some zip codes have values above 45 --- however, those zip codes have the same color scheme as counties with 45 contributors
+
+Now that that's out of the way, what do the above maps tell us about rural Pennsylvanians versus city Pennsylvanians?
+
+As for rural areas, Trump certainly had more contributors than Clinton. However, Clinton had a small number of contributors in many rural zip codes.
+
+As for cities, especially Philadelphia, the above maps don't helps us distinguish between the candidates. Because there were so many more contributors in urban zip codes, in order to see differences in rural areas, I needed to limit the max value on the scale. What can we learn about contributors in Philadelphia by focusing on zip codes in Philadelphia and changing the scales?
+
+```{r warning=FALSE, message=FALSE}
+map_philadelphia <- function (df, title) {
+  zip_choropleth(df, county_zoom = 42101, reference_map = TRUE, 
+    title = title, num_colors = 1) +
+  coord_map() +
+  scale_fill_gradient(low = "yellow", high = "blue", na.value = "black",
+    limits = c(0,200), oob = squish)
+}  
+
+map_philadelphia(choro_unique_clinton, "Clinton: Unique Contributors")
+```
+
+```{r warning=FALSE, message=FALSE}
+map_philadelphia(choro_unique_trump, "Trump: Unique Contributors")
+```
+
+
+Looking at unique contributors in Philadelphia, we find the converse of rural areas. Clinton certainly had more contributors than Trump, though Trump had a small number of contributors throughout most of the city.
+
+The numbers of unique contributors in different parts of a state seems like a possible predictor of how voters in those areas will vote.
+
+# Final Plots and Summary
+
+After exploring campaign contributions to the 2016 presidential campaigns in Pennsylvania, one of the most important take-aways is how potentially misleading contributions can be as a predictor of candidate's success.
+
+```{r}
+# "vlines" variable contains dates of notable events as numbers
+# ggplot's geom_vline needs xintercept values as numbers to plot
+vlines <- as.numeric(as.Date(c("2016-04-25", "2016-06-07", "2016-07-18",
+  "2016-07-28", "2016-11-08")))
+
+# "vlinesD" variable contains dates of notable events as dates
+# ggplot's annotate() needs x values as dates to plot
+vlinesD <- as.Date(c("2016-04-25", "2016-06-07", "2016-07-18",
+  "2016-07-28","2016-11-08"))
+
+# "events" variable describes the dates in vlines
+events <- c("Pennsylvania primary", "Last Republican primary (SD)", "RNC",
+  "DNC", "Election")
+
+plot_weeks(timeline_overall, "count", "Number of Contributions per Week") +
+  guides(color=guide_legend(nrow = 2, byrow = TRUE)) +
+  geom_vline(xintercept = vlines, linetype="dashed", color="grey40") +
+  annotate("text", x = (vlinesD) - 1, y = 7800, label=events, size = 3,
+    angle = 90, vjust = 0) +
+  ylim(0,12500)
+```
+
+
+The above plot shows the number of contributions received by a candidate during each week of the election season. If we relied on the number of contributions as a predictor of a candidate's success, we would have called every race wrong:
+
+Sanders led Clinton in contributions before the primary, but Clinton prevailed. Kruz led Trump in contributions before the primary, but Trump prevailed. Most strikingly, Clinton received many times more contributions per week than Trump during most of the primary and general election season, but Trump prevailed.
+
+Data can sometimes be used to predict the future, but it's just as important to uncover how data can mislead us about the future. In upcoming elections, we should perhaps be wary of media reports that suggest a correlation between the number of contributions received by a candidate and that candidate's odds of success.
+
+Of course, this tentative conclusion relies a single state's dataset during a single election -- an election which many observers would consider unusual. We cannot rule out that the number of contributions received by a candidate is generally a good predictor of success, but we should be skeptical of that relationship pending analysis of more datasets.
+
+However, another metric of campaign contributions seems to hold promise as a predictor of candidate's success.
+
+```{r}
+plot_weeks(timeline_unique, "count", 
+  "Unique Contributors per Week:\nBy Date of First Contribution") +
+    guides(color=guide_legend(nrow = 2, byrow = TRUE)) +
+    geom_vline(xintercept = vlines, linetype="dashed", color="grey40") +
+    annotate("text", x = (vlinesD) - 1, y = 2550, label=events, size = 3,
+      angle = 90, vjust = 0) +
+    ylim(0,4500)
+```
+
+
+The above plot shows the number of unique contributors to a candidate during each week of the election season. If a paricular contributor gave to a campaign more than once, only their first contribution is included in the plot.
+
+By focusing on unique contributors, an entirely different picture of Trump's campaign emerges. Though Trump received fewer contributions, many more of those contributions came from unique contributors. 
+
+The number of new contributors giving to his campaign peaked twice: (1) after Trump had secured his party's nomination and (2) after the Democratic National Convention. 
+
+We don't know what motivated so many first-time contributors to give at these specific times. Were they excited that they're preferred candidate had secured the Republican party's nomination? Were they dismayed that a candidate they disliked had secured the Democratic party's nomination? But we can say that the peak in July resulted from contributors reacting to the identities of the presumptive nominees, rather than contributors trying to influence the primary.
+
+We can also make some inferences based on the weeks when new contributors to Trump did not peak.
+
+First, in mid-August, the number of new contributors to Trump fell off, and he then trailed Clinton until the election in November. Mostly, the fall-off is notable for what it didn't signify --- it didn't signify that support for Trump had disappeared. Since Trump ultimately won the election, we can hypothesize that the number of unique contributors during an election season matters --- and that the exact timing of their contributions doesn't matter.
+
+Second, given the huge peaks for Trump's campaign in July and August, it's easy to miss that his campaign had very few new contributors before Pennsylvania's primary in late April.
+
+That's what brings us to our final, simplest plot.
+
+```{r}
+p3u <- make_bargraph(df_b4primary_unique, "count",
+  "Unique Contributors:\nBefore Pennsylvania Primary") +
+    theme(plot.margin = margin(r = 20))
+
+p4u <- make_bargraph(df_overall_unique, "count",
+  "Unique Contributors:\nEntire Election Season")
+
+grid.arrange(p3u, p4u, ncol = 2)
+```
+
+
+The number of unique contributors to a candidate does **not** say much about that candidate's likelihood of success in a state's primary. Here, again, Sanders led Clinton before the Pennsylvania primary, and Clinton prevailed in the primary. Cruz and even Kasich led Trump, and Trump prevailed in the primary.
+
+However, the number of unique contributors to a candidate may possibly be an indicator of that candidate's success during a general election. In this one area, Trump led Clinton, and ultimately Pennsylvanians selected Trump during the November presidential election.
+
+I can't stress enough: we cannot conclude that the number of unique contributors can predict election results. This is one data point, based on looking at one state during one election.
+
+But it's also the most interesting data point here. 
+
+When I began exploring this dataset, campaign contributions seemed like a lousy way to predict the likelihood of a candidate's success. Yet there's a chance that campaign contributions might have some predictive power after all. To investigate whether that's the case, the next step would be to investigate multiple elections in multiple states, and then to test whether there is a correlation between the number of unique contributors to a candidate and that candidate's likelihood of success.
+
+
