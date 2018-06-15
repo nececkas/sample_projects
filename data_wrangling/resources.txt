@@ -1,5 +1,0 @@
-I used the following resources when working on this project:
-
-https://stackoverflow.com/questions/17336943/removing-non-numeric-characters-from-a-string/17337613
-
-http://www.sqlitetutorial.net/sqlite-python/creating-database/
